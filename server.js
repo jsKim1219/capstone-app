@@ -2,10 +2,10 @@
 const express = require('express');
 const path = require('path');
 const admin = require('firebase-admin');
-const axios = require('axios');
-const fs = require('fs');
-const csv = require('csv-parser');
 const cron = require('node-cron');
+
+// 로컬 JSON 데이터 불러오기
+const gasDataJson = require('./csv/gas_data.json');
 
 const app = express();
 
@@ -28,21 +28,17 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const db = admin.database();
 
-// 공공기관 API 정보
-const powerApiUrl = 'https://www.data.go.kr/data/15039291/fileData.do';
-const gasCsvFilePath = path.join(__dirname, 'csv', 'Monthly_Gas_Usage.csv');
-
-// CSV 파일 존재 여부 확인
-if (!fs.existsSync(gasCsvFilePath)) {
-    console.warn('경고: 가스 CSV 파일을 찾을 수 없습니다:', gasCsvFilePath);
-}
-
 // 스케줄러: 매일 자정에 실행하여 데이터베이스 업데이트
 cron.schedule('0 0 * * *', async () => {
   console.log('데이터 업데이트 작업을 시작합니다...');
+  await updateData();
+});
+
+// 데이터 업데이트 로직을 별도 함수로 분리
+async function updateData() {
   try {
-    const powerData = await fetchPowerData();
-    const gasData = await parseGasCsvData();
+    const powerData = await fetchPowerData(); // 전기 사용량
+    const gasData = getLatestGasData(); // 가스 사용량
 
     const ref = db.ref('sensor_data');
     await ref.push({
@@ -56,75 +52,36 @@ cron.schedule('0 0 * * *', async () => {
       }
     });
     console.log('데이터가 Firebase에 성공적으로 저장되었습니다.');
+    return true;
   } catch (error) {
     console.error('데이터 업데이트 중 오류 발생:', error);
+    return false;
   }
-});
+}
 
 // 전력 API 데이터 호출 및 가공 함수 (가상 데이터)
 async function fetchPowerData() {
-  try {
-    // TODO: 실제 API 응답 구조에 맞게 수정 필요
-    return 300;
-  } catch (error) {
-    console.error('전력 데이터 API 호출 중 오류 발생:', error);
-    return null;
+  // TODO: 실제 API 응답 구조에 맞게 수정 필요
+  // 현재는 임의의 값을 반환합니다.
+  return Math.floor(Math.random() * (450 - 250 + 1)) + 250;
+}
+
+// 로컬 JSON 파일에서 최신 가스 사용량 데이터 가져오는 함수
+function getLatestGasData() {
+  if (!gasDataJson || gasDataJson.length === 0) {
+    console.warn('경고: 가스 데이터가 비어있습니다.');
+    return 0; // 데이터가 없을 경우 0을 반환
   }
+  // 가장 마지막 달의 평균값을 반환
+  const latestData = gasDataJson[gasDataJson.length - 1];
+  return latestData.average;
 }
 
-// 가스 CSV 파일 파싱 및 월별 평균 계산 함수
-function parseGasCsvData() {
-  return new Promise((resolve, reject) => {
-    if (!fs.existsSync(gasCsvFilePath)) {
-        return resolve([]);
-    }
-    
-    const monthlyAverages = {};
-    const parser = csv();
-
-    fs.createReadStream(gasCsvFilePath, { encoding: 'cp949' })
-      .pipe(parser)
-      .on('data', (row) => {
-        const yearMonth = row['연월'].substring(0, 7);
-        const regions = Object.keys(row).filter(key => key !== '연월');
-        let totalUsage = 0;
-        let regionCount = 0;
-
-        regions.forEach(region => {
-          const usage = parseFloat(row[region]);
-          if (!isNaN(usage)) {
-            totalUsage += usage;
-            regionCount++;
-          }
-        });
-
-        if (regionCount > 0) {
-          if (!monthlyAverages[yearMonth]) {
-            monthlyAverages[yearMonth] = { total: 0, count: 0 };
-          }
-          monthlyAverages[yearMonth].total += totalUsage / regionCount;
-          monthlyAverages[yearMonth].count++;
-        }
-      })
-      .on('end', () => {
-        const result = Object.keys(monthlyAverages).map(key => ({
-          month: key,
-          average: monthlyAverages[key].total / monthlyAverages[key].count
-        }));
-        console.log('가스 CSV 파일 파싱 및 평균 계산 완료.');
-        resolve(result);
-      })
-      .on('error', (error) => {
-        console.error('가스 CSV 파일 파싱 중 오류 발생:', error);
-        reject(error);
-      });
-  });
-}
-
-// 새로운 API 엔드포인트: 사용량 데이터 조회
+// API 엔드포인트: 사용량 데이터 조회
 app.get('/api/usage-data', async (req, res) => {
   try {
-    const snapshot = await db.ref('sensor_data').once('value');
+    // orderByKey().limitToLast(30) -> 최신 30개 데이터만 가져오도록 수정
+    const snapshot = await db.ref('sensor_data').orderByKey().limitToLast(30).once('value');
     const data = snapshot.val();
 
     if (!data) {
@@ -136,21 +93,16 @@ app.get('/api/usage-data', async (req, res) => {
 
     Object.keys(data).forEach(key => {
       const entry = data[key];
-      // 기존 데이터 구조와 새 데이터 구조 모두 처리
-      const electricityValue = entry.electricity ? entry.electricity.value : entry.electricityValue;
-      const gasValue = entry.gas ? entry.gas.value : entry.gasValue;
-      const timestamp = entry.electricity ? entry.electricity.timestamp : entry.timestamp;
-
-      if (electricityValue !== undefined) {
+      if (entry.electricity && entry.electricity.value !== undefined) {
         electricityData.push({
-          timestamp: timestamp,
-          value: electricityValue
+          timestamp: entry.electricity.timestamp,
+          value: entry.electricity.value
         });
       }
-      if (gasValue !== undefined) {
+      if (entry.gas && entry.gas.value !== undefined) {
         gasData.push({
-          timestamp: timestamp,
-          value: gasValue
+          timestamp: entry.gas.timestamp,
+          value: entry.gas.value
         });
       }
     });
@@ -165,28 +117,13 @@ app.get('/api/usage-data', async (req, res) => {
   }
 });
 
-// 새로운 엔드포인트 추가: 데이터 수동 업데이트
+// 엔드포인트 추가: 데이터 수동 업데이트
 app.post('/api/update-data', async (req, res) => {
   console.log('수동으로 데이터 업데이트 작업을 시작합니다...');
-  try {
-    const powerData = await fetchPowerData();
-    const gasData = await parseGasCsvData();
-
-    const ref = db.ref('sensor_data');
-    await ref.push({
-      electricity: {
-        value: powerData,
-        timestamp: admin.database.ServerValue.TIMESTAMP
-      },
-      gas: {
-        value: gasData,
-        timestamp: admin.database.ServerValue.TIMESTAMP
-      }
-    });
-    console.log('데이터가 Firebase에 성공적으로 저장되었습니다.');
+  const success = await updateData();
+  if (success) {
     res.status(200).json({ message: '데이터 업데이트 완료' });
-  } catch (error) {
-    console.error('데이터 업데이트 중 오류 발생:', error);
+  } else {
     res.status(500).json({ error: '서버 오류가 발생했습니다.' });
   }
 });
