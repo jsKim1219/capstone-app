@@ -1,0 +1,8 @@
+# Firebase 서비스 계정 키 파일
+serviceAccountKey.json
+
+# Node.js에서 자동으로 생성되는 폴더
+node_modules/
+
+# 안드로이드 스튜디오 프로젝트 폴더 (업로드 제외)
+capstone_app/
