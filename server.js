@@ -21,7 +21,7 @@ try {
 // Firebase Admin SDK 초기화
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccountKey),
-  databaseURL: "https://capstone-55527.firebaseio.com"
+  databaseURL: "https://capstone-55527-default-rtdb.asia-southeast1.firebasedatabase.app"
 });
 
 app.use(express.json());
