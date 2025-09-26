@@ -1,85 +1,99 @@
 // 필요한 모듈 불러오기
 const express = require('express');
 const path = require('path');
-const admin = require('firebase-admin'); // Firebase Admin SDK 불러오기
-const axios = require('axios'); // API 요청을 위한 axios 모듈
-const fs = require('fs'); // 파일 시스템 모듈
-const csv = require('csv-parser'); // CSV 파싱을 위한 모듈
+const admin = require('firebase-admin');
+const axios = require('axios');
+const fs = require('fs');
+const csv = require('csv-parser');
+const cron = require('node-cron');
 
 const app = express();
 
-// Firebase 서비스 계정 키 불러오기
-// 이 파일은 절대 공개된 GitHub에 올리면 안 됩니다.
-const serviceAccount = require('./serviceAccountKey.json');
+// Render 환경 변수에서 키 정보 불러오기
+const serviceAccountKey = JSON.parse(process.env.SERVICE_ACCOUNT_KEY);
 
 // Firebase Admin SDK 초기화
 admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-  databaseURL: "https://capstone-55527.firebaseio.com" // YOUR-PROJECT-ID를 본인 프로젝트 ID로 변경
+  credential: admin.credential.cert(serviceAccountKey),
+  databaseURL: "https://capstone-55527.firebaseio.com"
 });
 
-// JSON 형식의 요청 본문을 파싱하기 위한 미들웨어
 app.use(express.json());
-
-// Render가 지정하는 포트 사용
 const PORT = process.env.PORT || 3000;
+const db = admin.database();
 
-// 정적 파일 제공
-app.use(express.static(path.join(__dirname)));
+// 공공기관 API 정보
+const powerApiUrl = 'https://www.data.go.kr/data/15039291/fileData.do';
+const gasCsvFilePath = path.join(__dirname, 'csv', 'Monthly_Gas_Usage.csv');
 
-// 기본 라우트
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'index.html'));
-});
-
-// 새로운 API 엔드포인트: 아두이노 센서 데이터 수신
-app.post('/api/sensor-data', (req, res) => {
+// 스케줄러: 매일 자정에 실행하여 데이터베이스 업데이트
+// 이 스케줄러는 Render 서버에 배포했을 때 24시간 작동합니다.
+cron.schedule('0 0 * * *', async () => {
+  console.log('데이터 업데이트 작업을 시작합니다...');
   try {
-    const sensorData = req.body;
-    console.log('수신된 센서 데이터:', sensorData);
+    const powerData = await fetchPowerData();
+    const gasData = await parseGasCsvData();
 
-    // Firebase Realtime Database에 데이터 저장
-    const db = admin.database();
-    const ref = db.ref('sensor_data'); // 'sensor_data' 경로에 저장
-    const newRecordRef = ref.push(); // 새로운 고유 키 생성
-    
-    newRecordRef.set({
-      ...sensorData,
-      timestamp: admin.database.ServerValue.TIMESTAMP // 서버 타임스탬프
+    const ref = db.ref('sensor_data');
+    await ref.push({
+      electricityValue: powerData,
+      gasValue: gasData,
+      timestamp: admin.database.ServerValue.TIMESTAMP
     });
-
-    res.status(200).json({ message: '데이터가 성공적으로 저장되었습니다.' });
+    console.log('데이터가 Firebase에 성공적으로 저장되었습니다.');
   } catch (error) {
-    console.error('데이터 저장 중 오류 발생:', error);
-    res.status(500).json({ error: '서버 오류가 발생했습니다.' });
+    console.error('데이터 업데이트 중 오류 발생:', error);
   }
 });
 
-// 전력 API 호출 함수
+// 전력 API 데이터 호출 및 가공 함수 (가상 데이터)
 async function fetchPowerData() {
-  const url = 'https://www.data.go.kr/data/15039291/fileData.do';
   try {
-    const response = await axios.get(url);
-    // TODO: 응답 데이터 형식에 맞춰 데이터 파싱 및 처리 로직 추가
-    console.log('전력 데이터 API 호출 성공:', response.data);
-    return response.data;
+    // TODO: 실제 API 응답 구조에 맞게 수정 필요
+    return 300; // 가상 전력 사용량 값
   } catch (error) {
     console.error('전력 데이터 API 호출 중 오류 발생:', error);
     return null;
   }
 }
 
-// 가스 CSV 파일 파싱 함수
+// 가스 CSV 파일 파싱 및 월별 평균 계산 함수
 function parseGasCsvData() {
-  const filePath = path.join(__dirname, 'csv', 'Monthly_Gas_Usage.csv');
-  const results = [];
   return new Promise((resolve, reject) => {
-    fs.createReadStream(filePath)
-      .pipe(csv())
-      .on('data', (data) => results.push(data))
+    const monthlyAverages = {};
+    const parser = csv();
+
+    fs.createReadStream(gasCsvFilePath, { encoding: 'cp949' })
+      .pipe(parser)
+      .on('data', (row) => {
+        const yearMonth = row['연월'].substring(0, 7);
+        const regions = Object.keys(row).filter(key => key !== '연월');
+        let totalUsage = 0;
+        let regionCount = 0;
+
+        regions.forEach(region => {
+          const usage = parseFloat(row[region]);
+          if (!isNaN(usage)) {
+            totalUsage += usage;
+            regionCount++;
+          }
+        });
+
+        if (regionCount > 0) {
+          if (!monthlyAverages[yearMonth]) {
+            monthlyAverages[yearMonth] = { total: 0, count: 0 };
+          }
+          monthlyAverages[yearMonth].total += totalUsage / regionCount;
+          monthlyAverages[yearMonth].count++;
+        }
+      })
       .on('end', () => {
-        console.log('가스 CSV 파일 파싱 완료:', results);
-        resolve(results);
+        const result = Object.keys(monthlyAverages).map(key => ({
+          month: key,
+          average: monthlyAverages[key].total / monthlyAverages[key].count
+        }));
+        console.log('가스 CSV 파일 파싱 및 평균 계산 완료.');
+        resolve(result);
       })
       .on('error', (error) => {
         console.error('가스 CSV 파일 파싱 중 오류 발생:', error);
@@ -88,32 +102,44 @@ function parseGasCsvData() {
   });
 }
 
-// 새로운 API 엔드포인트: 사용량 데이터 조회 및 외부 API 호출
+// 새로운 API 엔드포인트: 사용량 데이터 조회
 app.get('/api/usage-data', async (req, res) => {
   try {
-    // Firebase Realtime Database에서 센서 데이터 조회
-    const db = admin.database();
-    const ref = db.ref('sensor_data');
-    const snapshot = await ref.once('value');
-    const sensorData = snapshot.val();
+    const snapshot = await db.ref('sensor_data').once('value');
+    const data = snapshot.val();
 
-    // 외부 전력 API 데이터 호출
-    const powerApiData = await fetchPowerData();
+    if (!data) {
+      return res.status(404).json({ error: '데이터를 찾을 수 없습니다.' });
+    }
 
-    // 로컬 가스 CSV 데이터 파싱
-    const gasCsvData = await parseGasCsvData();
+    const electricityData = [];
+    const gasData = [];
+
+    Object.keys(data).forEach(key => {
+      const entry = data[key];
+      if (entry.electricityValue !== undefined) {
+        electricityData.push({
+          timestamp: entry.timestamp,
+          value: entry.electricityValue
+        });
+      }
+      if (entry.gasValue !== undefined) {
+        gasData.push({
+          timestamp: entry.timestamp,
+          value: entry.gasValue
+        });
+      }
+    });
 
     res.status(200).json({
-      sensorData,
-      powerApiData,
-      gasCsvData
+      electricity: electricityData,
+      gas: gasData
     });
   } catch (error) {
     console.error('사용량 데이터 조회 중 오류 발생:', error);
     res.status(500).json({ error: '서버 오류가 발생했습니다.' });
   }
 });
-
 
 // 서버 시작
 app.listen(PORT, () => {
