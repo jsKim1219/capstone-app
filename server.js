@@ -15,7 +15,7 @@ try {
   serviceAccountKey = JSON.parse(process.env.SERVICE_ACCOUNT_KEY);
 } catch (e) {
   console.error("SERVICE_ACCOUNT_KEY 환경 변수가 올바른 JSON 형식이 아닙니다.", e);
-  process.exit(1); // 오류 발생 시 서버 종료
+  process.exit(1);
 }
 
 // Firebase Admin SDK 초기화
@@ -38,7 +38,6 @@ if (!fs.existsSync(gasCsvFilePath)) {
 }
 
 // 스케줄러: 매일 자정에 실행하여 데이터베이스 업데이트
-// 이 스케줄러는 Render 서버에 배포했을 때 24시간 작동합니다.
 cron.schedule('0 0 * * *', async () => {
   console.log('데이터 업데이트 작업을 시작합니다...');
   try {
@@ -47,9 +46,14 @@ cron.schedule('0 0 * * *', async () => {
 
     const ref = db.ref('sensor_data');
     await ref.push({
-      electricityValue: powerData,
-      gasValue: gasData,
-      timestamp: admin.database.ServerValue.TIMESTAMP
+      electricity: {
+        value: powerData,
+        timestamp: admin.database.ServerValue.TIMESTAMP
+      },
+      gas: {
+        value: gasData,
+        timestamp: admin.database.ServerValue.TIMESTAMP
+      }
     });
     console.log('데이터가 Firebase에 성공적으로 저장되었습니다.');
   } catch (error) {
@@ -61,8 +65,7 @@ cron.schedule('0 0 * * *', async () => {
 async function fetchPowerData() {
   try {
     // TODO: 실제 API 응답 구조에 맞게 수정 필요
-    // 이 URL은 파일 다운로드 URL이므로, 실제 API 엔드포인트 URL로 변경해야 합니다.
-    return 300; // 가상 전력 사용량 값
+    return 300;
   } catch (error) {
     console.error('전력 데이터 API 호출 중 오류 발생:', error);
     return null;
@@ -73,7 +76,7 @@ async function fetchPowerData() {
 function parseGasCsvData() {
   return new Promise((resolve, reject) => {
     if (!fs.existsSync(gasCsvFilePath)) {
-        return resolve([]); // 파일이 없으면 빈 배열 반환
+        return resolve([]);
     }
     
     const monthlyAverages = {};
@@ -133,16 +136,21 @@ app.get('/api/usage-data', async (req, res) => {
 
     Object.keys(data).forEach(key => {
       const entry = data[key];
-      if (entry.electricityValue !== undefined) {
+      // 기존 데이터 구조와 새 데이터 구조 모두 처리
+      const electricityValue = entry.electricity ? entry.electricity.value : entry.electricityValue;
+      const gasValue = entry.gas ? entry.gas.value : entry.gasValue;
+      const timestamp = entry.electricity ? entry.electricity.timestamp : entry.timestamp;
+
+      if (electricityValue !== undefined) {
         electricityData.push({
-          timestamp: entry.timestamp,
-          value: entry.electricityValue
+          timestamp: timestamp,
+          value: electricityValue
         });
       }
-      if (entry.gasValue !== undefined) {
+      if (gasValue !== undefined) {
         gasData.push({
-          timestamp: entry.timestamp,
-          value: entry.gasValue
+          timestamp: timestamp,
+          value: gasValue
         });
       }
     });
@@ -156,6 +164,7 @@ app.get('/api/usage-data', async (req, res) => {
     res.status(500).json({ error: '서버 오류가 발생했습니다.' });
   }
 });
+
 // 새로운 엔드포인트 추가: 데이터 수동 업데이트
 app.post('/api/update-data', async (req, res) => {
   console.log('수동으로 데이터 업데이트 작업을 시작합니다...');
@@ -165,9 +174,14 @@ app.post('/api/update-data', async (req, res) => {
 
     const ref = db.ref('sensor_data');
     await ref.push({
-      electricityValue: powerData,
-      gasValue: gasData,
-      timestamp: admin.database.ServerValue.TIMESTAMP
+      electricity: {
+        value: powerData,
+        timestamp: admin.database.ServerValue.TIMESTAMP
+      },
+      gas: {
+        value: gasData,
+        timestamp: admin.database.ServerValue.TIMESTAMP
+      }
     });
     console.log('데이터가 Firebase에 성공적으로 저장되었습니다.');
     res.status(200).json({ message: '데이터 업데이트 완료' });
