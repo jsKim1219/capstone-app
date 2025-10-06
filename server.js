@@ -1,6 +1,5 @@
 // 필요한 모듈 불러오기
 const express = require('express');
-const path = require('path');
 const admin = require('firebase-admin');
 const cron = require('node-cron');
 
@@ -13,6 +12,7 @@ try {
 }
 
 const app = express();
+app.use(express.json()); // JSON 요청 본문을 파싱하기 위해 추가
 
 // Render 환경 변수에서 키 정보 불러오기
 let serviceAccountKey;
@@ -33,13 +33,11 @@ try {
     console.error("Firebase 초기화 실패:", error);
 }
 
-app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const db = admin.database();
 
-// --- 데이터 업데이트 관련 함수들 ---
+// --- 데이터 업데이트 관련 함수들 (기존 코드) ---
 
-// (1) 오늘 날짜로 새로운 데이터 1건 추가 (기존 force-update 기능)
 async function updateSingleData() {
   try {
     const powerData = Math.floor(Math.random() * (450 - 250 + 1)) + 250;
@@ -61,16 +59,14 @@ async function updateSingleData() {
   }
 }
 
-// 스케줄러: 매일 자정에 새로운 데이터 1건 추가
 cron.schedule('0 0 * * *', async () => {
   console.log('스케줄러에 의한 데이터 업데이트 작업을 시작합니다...');
   await updateSingleData();
 });
 
 
-// --- API 엔드포인트들 ---
+// --- API 엔드포인트들 (기존 코드) ---
 
-// API: 사용량 데이터 조회
 app.get('/api/usage-data', async (req, res) => {
   try {
     const snapshot = await db.ref('sensor_data').orderByChild('gas/timestamp').once('value');
@@ -106,7 +102,6 @@ app.get('/api/usage-data', async (req, res) => {
   }
 });
 
-// API: 오늘 날짜로 새 데이터 1건 수동 추가
 app.get('/api/force-update', async (req, res) => {
   console.log('수동으로 실시간 데이터 업데이트 작업을 시작합니다...');
   const success = await updateSingleData();
@@ -117,39 +112,80 @@ app.get('/api/force-update', async (req, res) => {
   }
 });
 
-// (2) API: 전체 과거 데이터로 DB 초기화 (새로 추가된 기능)
 app.get('/api/init-historical-data', async (req, res) => {
     console.log('과거 데이터로 데이터베이스 초기화 작업을 시작합니다...');
     try {
         if (!gasDataJson || gasDataJson.length === 0) {
             return res.status(400).send('<h1>초기화 실패</h1><p>gas_data.json 파일이 없거나 비어있습니다.</p>');
         }
-
         const ref = db.ref('sensor_data');
-        // 1. 기존 데이터를 모두 삭제
         await ref.set(null);
-        console.log('기존 sensor_data를 삭제했습니다.');
-
-        // 2. gas_data.json의 모든 항목을 Firebase에 저장
         for (const item of gasDataJson) {
-            // '2022-01' 같은 문자열을 자바스크립트 날짜 객체로 변환 후 타임스탬프로 저장
             const timestamp = new Date(item.month + '-01').getTime();
             const gasValue = item.average;
-            // 각 월에 해당하는 가상 전력 데이터 생성
             const electricityValue = Math.floor(Math.random() * (450 - 250 + 1)) + 250;
-
             await ref.push({
                 electricity: { value: electricityValue, timestamp: timestamp },
                 gas: { value: gasValue, timestamp: timestamp }
             });
         }
-        
         console.log('gas_data.json의 모든 데이터로 Firebase를 초기화했습니다.');
         res.status(200).send('<h1>데이터베이스 초기화 성공!</h1><p>이제 앱을 다시 실행하여 과거 데이터 차트를 확인해보세요.</p>');
-
     } catch(error) {
         console.error('데이터베이스 초기화 중 오류 발생:', error);
         res.status(500).send('<h1>데이터베이스 초기화 실패!</h1><p>Render 로그를 확인해주세요.</p>');
+    }
+});
+
+// ========================================================
+// ===        새로운 사용자 관리 API 엔드포인트        ===
+// ========================================================
+
+const usersRef = db.ref('users');
+
+// 1. GET /api/users : 모든 사용자 목록 가져오기
+app.get('/api/users', async (req, res) => {
+    try {
+        const snapshot = await usersRef.once('value');
+        res.status(200).json(snapshot.val() || {});
+    } catch (error) {
+        console.error('사용자 데이터 조회 오류:', error);
+        res.status(500).json({ error: '서버 오류가 발생했습니다.' });
+    }
+});
+
+// 2. POST /api/users : 새 사용자 추가하기
+app.post('/api/users', async (req, res) => {
+    try {
+        const newUserRef = usersRef.push();
+        await newUserRef.set(req.body);
+        // Firebase에서 생성된 고유 키(ID)를 응답에 포함하여 클라이언트에 전달
+        res.status(201).json({ id: newUserRef.key, ...req.body });
+    } catch (error) {
+        console.error('사용자 추가 오류:', error);
+        res.status(500).json({ error: '서버 오류가 발생했습니다.' });
+    }
+});
+
+// 3. PUT /api/users/:id : 특정 사용자 정보 수정하기
+app.put('/api/users/:id', async (req, res) => {
+    try {
+        await usersRef.child(req.params.id).update(req.body);
+        res.status(200).send('사용자 정보가 성공적으로 수정되었습니다.');
+    } catch (error) {
+        console.error('사용자 수정 오류:', error);
+        res.status(500).json({ error: '서버 오류가 발생했습니다.' });
+    }
+});
+
+// 4. DELETE /api/users/:id : 특정 사용자 삭제하기
+app.delete('/api/users/:id', async (req, res) => {
+    try {
+        await usersRef.child(req.params.id).remove();
+        res.status(200).send('사용자가 성공적으로 삭제되었습니다.');
+    } catch (error) {
+        console.error('사용자 삭제 오류:', error);
+        res.status(500).json({ error: '서버 오류가 발생했습니다.' });
     }
 });
 
