@@ -30,9 +30,7 @@ try {
     admin.initializeApp({
       credential: admin.credential.cert(serviceAccountKey),
       databaseURL: "https://capstone-55527-default-rtdb.asia-southeast1.firebasedabase.app",
-      // --- 이 줄을 추가하고 본인의 주소로 변경해주세요 ---
-      storageBucket: "YOUR_BUCKET_URL_HERE" 
-      // 예: "capstone-12345.appspot.com"
+      storageBucket: "capstone-55527.firebasestorage.app" 
     });
 } catch(error) {
     console.error("Firebase 초기화 실패:", error);
