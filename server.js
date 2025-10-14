@@ -23,13 +23,13 @@ try {
   process.exit(1);
 }
 
-// ========================================================
-// ===        !!! 중요: Firebase 초기화 수정 !!!        ===
-// ========================================================
 try {
     admin.initializeApp({
       credential: admin.credential.cert(serviceAccountKey),
-      databaseURL: "https://capstone-55527-default-rtdb.asia-southeast1.firebasedabase.app",
+      // ========================================================
+      // ===        !!! 중요: 오타가 수정된 부분 !!!        ===
+      // ========================================================
+      databaseURL: "https://capstone-55527-default-rtdb.asia-southeast1.firebasedatabase.app",
       storageBucket: "capstone-55527.firebasestorage.app" 
     });
 } catch(error) {
@@ -141,13 +141,10 @@ app.get('/api/init-historical-data', async (req, res) => {
 });
 
 
-// ========================================================
-// ===        사용자 관리 API 엔드포인트 (일부 수정)     ===
-// ========================================================
+// --- 사용자 관리 API 엔드포인트들 (기존과 동일) ---
 
 const usersRef = db.ref('users');
 
-// 1. GET /api/users : 모든 사용자 목록 가져오기 (기존과 동일)
 app.get('/api/users', async (req, res) => {
     try {
         const snapshot = await usersRef.once('value');
@@ -158,7 +155,6 @@ app.get('/api/users', async (req, res) => {
     }
 });
 
-// 2. POST /api/users : 새 사용자 추가하기 (기존과 동일)
 app.post('/api/users', async (req, res) => {
     try {
         const newUserRef = usersRef.push();
@@ -170,7 +166,6 @@ app.post('/api/users', async (req, res) => {
     }
 });
 
-// 3. PUT /api/users/:id : 특정 사용자 정보 수정하기 (기존과 동일)
 app.put('/api/users/:id', async (req, res) => {
     try {
         await usersRef.child(req.params.id).update(req.body);
@@ -181,9 +176,6 @@ app.put('/api/users/:id', async (req, res) => {
     }
 });
 
-// ========================================================
-// ===   !!! 중요: 사용자 삭제 API 수정 (사진 삭제 포함) !!!  ===
-// ========================================================
 app.delete('/api/users/:id', async (req, res) => {
     const userId = req.params.id;
     const userRef = usersRef.child(userId);
@@ -192,27 +184,19 @@ app.delete('/api/users/:id', async (req, res) => {
         const snapshot = await userRef.once('value');
         const userData = snapshot.val();
 
-        // 1. 사용자의 이미지 URL이 있는지 확인
         if (userData && userData.imageUrl) {
             const imageUrl = userData.imageUrl;
-            
-            // 2. 이미지 URL에서 스토리지 파일 경로를 추출
             const filePath = decodeURIComponent(imageUrl.split('/o/')[1].split('?')[0]);
-            
-            // 3. 스토리지에서 해당 파일 삭제
             const file = admin.storage().bucket().file(filePath);
             await file.delete();
             console.log(`스토리지에서 ${filePath} 파일 삭제 성공`);
         }
 
-        // 4. 데이터베이스에서 사용자 정보 삭제
         await userRef.remove();
         console.log(`데이터베이스에서 사용자 ${userId} 삭제 성공`);
-
         res.status(200).send('사용자가 성공적으로 삭제되었습니다.');
 
     } catch (error) {
-        // 스토리지에 파일이 없는 등 오류가 발생해도 DB 삭제는 시도
         if (error.code === 404) {
             console.warn('스토리지에 파일이 없어 DB 정보만 삭제합니다.');
             await userRef.remove();
