@@ -26,9 +26,6 @@ try {
 try {
     admin.initializeApp({
       credential: admin.credential.cert(serviceAccountKey),
-      // ========================================================
-      // ===        !!! 중요: 오타가 수정된 부분 !!!        ===
-      // ========================================================
       databaseURL: "https://capstone-55527-default-rtdb.asia-southeast1.firebasedatabase.app",
       storageBucket: "capstone-55527.firebasestorage.app" 
     });
@@ -39,7 +36,7 @@ try {
 const PORT = process.env.PORT || 3000;
 const db = admin.database();
 
-// --- 데이터 업데이트 관련 함수들 (기존과 동일) ---
+// --- 데이터 업데이트 관련 함수들 (가짜 데이터 생성용) ---
 
 async function updateSingleData() {
   try {
@@ -62,14 +59,67 @@ async function updateSingleData() {
   }
 }
 
+// 매일 자정마다 가짜 데이터 1건 추가
 cron.schedule('0 0 * * *', async () => {
   console.log('스케줄러에 의한 데이터 업데이트 작업을 시작합니다...');
   await updateSingleData();
 });
 
 
-// --- API 엔드포인트들 (기존과 동일) ---
+// --- API 엔드포인트들 ---
 
+// [신규] 아두이노(ESP32)에서 실제 센서 데이터를 받기 위한 API
+/**
+ * 아두이노(ESP32) 등 외부 장치로부터 센서 데이터를 받아 Firebase에 저장합니다.
+ * POST /api/sensor-data
+ * 요청 본문(Body) 예시: { "electricity": 350.5, "gas": 12.8 }
+ */
+app.post('/api/sensor-data', async (req, res) => {
+  // 요청 본문에서 electricity와 gas 값을 추출
+  const { electricity, gas } = req.body;
+
+  // 데이터 유효성 검사 (두 값 중 하나라도 숫자인지 확인)
+  const electricityValue = parseFloat(electricity);
+  const gasValue = parseFloat(gas);
+
+  if (isNaN(electricityValue) && isNaN(gasValue)) {
+    console.error('수신 데이터 오류: 유효한 electricity 또는 gas 값이 없습니다.', req.body);
+    return res.status(400).json({ error: '유효한 electricity 또는 gas 값이 필요합니다.' });
+  }
+
+  try {
+    const ref = db.ref('sensor_data');
+    const newData = {};
+
+    // electricity 값이 있으면 객체에 추가
+    if (!isNaN(electricityValue)) {
+      newData.electricity = { 
+        value: electricityValue, 
+        timestamp: admin.database.ServerValue.TIMESTAMP 
+      };
+    }
+
+    // gas 값이 있으면 객체에 추가
+    if (!isNaN(gasValue)) {
+      newData.gas = { 
+        value: gasValue, 
+        timestamp: admin.database.ServerValue.TIMESTAMP 
+      };
+    }
+
+    // Firebase에 데이터 저장
+    await ref.push(newData);
+    
+    console.log('Arduino/ESP32로부터 새 데이터 수신 및 저장:', newData);
+    res.status(201).json({ message: '데이터가 성공적으로 저장되었습니다.', data: newData });
+
+  } catch (error) {
+    console.error('센서 데이터 저장 중 오류 발생:', error);
+    res.status(500).json({ error: '서버 오류가 발생했습니다.' });
+  }
+});
+
+// (기존) 앱에서 사용량 데이터를 요청하는 API
 app.get('/api/usage-data', async (req, res) => {
   try {
     const snapshot = await db.ref('sensor_data').orderByChild('gas/timestamp').once('value');
@@ -105,6 +155,7 @@ app.get('/api/usage-data', async (req, res) => {
   }
 });
 
+// (기존) 테스트용: 가짜 데이터를 수동으로 추가하는 API
 app.get('/api/force-update', async (req, res) => {
   console.log('수동으로 실시간 데이터 업데이트 작업을 시작합니다...');
   const success = await updateSingleData();
@@ -115,6 +166,7 @@ app.get('/api/force-update', async (req, res) => {
   }
 });
 
+// (기존) 테스트용: DB를 과거 데이터로 초기화하는 API
 app.get('/api/init-historical-data', async (req, res) => {
     console.log('과거 데이터로 데이터베이스 초기화 작업을 시작합니다...');
     try {
