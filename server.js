@@ -36,30 +36,147 @@ try {
 const PORT = process.env.PORT || 3000;
 const db = admin.database();
 
-// --- 데이터 업데이트 관련 함수들 (가짜 데이터 생성용) ---
+// --- [신규] 시간 관련 헬퍼 함수 ---
 
+/**
+ * 현재 시간을 KST(한국 표준시) 기준 'YYYY-MM' 문자열로 반환합니다.
+ */
+function getCurrentMonthKST() {
+  const now = new Date();
+  const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
+  const kstOffset = 9 * 60 * 60000; // KST는 UTC+9
+  const kstNow = new Date(utc + kstOffset);
+  
+  const year = kstNow.getFullYear();
+  const month = (kstNow.getMonth() + 1).toString().padStart(2, '0');
+  return `${year}-${month}`;
+}
+
+/**
+ * 주어진 타임스탬프를 KST(한국 표준시) 기준 'YYYY-MM' 문자열로 반환합니다.
+ * @param {number} timestamp - Unix 타임스탬프 (밀리초)
+ */
+function getMonthKST(timestamp) {
+  const date = new Date(timestamp);
+  const utc = date.getTime() + (date.getTimezoneOffset() * 60000);
+  const kstOffset = 9 * 60 * 60000; // KST는 UTC+9
+  const kstDate = new Date(utc + kstOffset);
+  
+  const year = kstDate.getFullYear();
+  const month = (kstDate.getMonth() + 1).toString().padStart(2, '0');
+  return `${year}-${month}`;
+}
+
+
+// --- [수정] 데이터 업데이트 관련 함수 (누적 로직) ---
+
+/**
+ * [신규] 데이터를 누적하거나 새로 추가하는 공통 함수
+ * @param {object} dataToSave - { electricityValue: number, gasValue: number }
+ */
+async function accumulateOrPushData(dataToSave) {
+  const { electricityValue, gasValue } = dataToSave;
+  const ref = db.ref('sensor_data');
+  
+  try {
+    // 1. 가장 최근 데이터를 가져옵니다. (push key 기준 정렬)
+    const snapshot = await ref.orderByKey().limitToLast(1).once('value');
+    const currentMonth = getCurrentMonthKST(); // 예: "2025-11"
+
+    let latestKey = null;
+    let latestData = null;
+    let latestMonth = null;
+
+    if (snapshot.exists()) {
+      latestKey = Object.keys(snapshot.val())[0];
+      latestData = snapshot.val()[latestKey];
+      
+      // 2. 최근 데이터의 타임스탬프를 확인합니다 (전기/가스 둘 중 하나 기준)
+      const latestTimestamp = latestData.electricity?.timestamp || latestData.gas?.timestamp || 0;
+      if (latestTimestamp > 0) {
+        latestMonth = getMonthKST(latestTimestamp); // 예: "2025-10"
+      }
+    }
+
+    // 3. 현재 월과 최근 데이터의 월을 비교합니다.
+    if (latestKey && latestMonth === currentMonth) {
+      // --- 3-1. 같은 달인 경우: 데이터 누적 (Transaction) ---
+      const latestRecordRef = ref.child(latestKey);
+      await latestRecordRef.transaction((currentData) => {
+        if (currentData === null) {
+          return null; // 레코드가 그 사이에 삭제됨. 트랜잭션 중단.
+        }
+        
+        // 전기 값 누적
+        if (!isNaN(electricityValue)) {
+          currentData.electricity = currentData.electricity || { value: 0 }; // 없으면 0으로 초기화
+          currentData.electricity.value = (currentData.electricity.value || 0) + electricityValue;
+          currentData.electricity.timestamp = admin.database.ServerValue.TIMESTAMP;
+        }
+        
+        // 가스 값 누적
+        if (!isNaN(gasValue)) {
+          currentData.gas = currentData.gas || { value: 0 }; // 없으면 0으로 초기화
+          currentData.gas.value = (currentData.gas.value || 0) + gasValue;
+          currentData.gas.timestamp = admin.database.ServerValue.TIMESTAMP;
+        }
+        
+        return currentData; // 수정된 데이터를 반환하여 DB에 저장
+      });
+      
+      console.log(`[${currentMonth}] 데이터 누적 완료 (Key: ${latestKey}):`, dataToSave);
+      return { accumulated: true, key: latestKey };
+
+    } else {
+      // --- 3-2. 다른 달이거나 DB가 비어있는 경우: 새 데이터 추가 (Push) ---
+      const newData = {};
+      const timestamp = admin.database.ServerValue.TIMESTAMP;
+      
+      if (!isNaN(electricityValue)) {
+        newData.electricity = { value: electricityValue, timestamp: timestamp };
+      }
+      if (!isNaN(gasValue)) {
+        newData.gas = { value: gasValue, timestamp: timestamp };
+      }
+
+      if (Object.keys(newData).length > 0) {
+        const newRecordRef = await ref.push(newData);
+        console.log(`[${currentMonth}] 새 데이터 추가 완료:`, newData);
+        return { accumulated: false, key: newRecordRef.key };
+      }
+      return { accumulated: false, key: null }; // 유효한 데이터가 없음
+    }
+  } catch (error) {
+    console.error('데이터 저장/누적 중 오류:', error);
+    throw error; // 오류를 상위로 전파
+  }
+}
+
+/**
+ * [수정] 스케줄러/테스트용 데이터 생성 함수 (누적 로직 사용)
+ */
 async function updateSingleData() {
   try {
+    // 시뮬레이션용 가짜 데이터 생성
     const powerData = Math.floor(Math.random() * (450 - 250 + 1)) + 250;
+    // 기존 로직 유지 (JSON 파일의 마지막 가스 데이터 사용)
     const latestGasData = (gasDataJson.length > 0) ? gasDataJson[gasDataJson.length - 1].average : 0;
 
-    if (db) {
-        const ref = db.ref('sensor_data');
-        await ref.push({
-          electricity: { value: powerData, timestamp: admin.database.ServerValue.TIMESTAMP },
-          gas: { value: latestGasData, timestamp: admin.database.ServerValue.TIMESTAMP }
-        });
-        console.log('새로운 실시간 데이터 1건이 Firebase에 저장되었습니다.');
-        return true;
-    }
-    return false;
+    // 공통 함수 호출
+    await accumulateOrPushData({
+      electricityValue: powerData,
+      gasValue: latestGasData
+    });
+    
+    console.log('스케줄링된 데이터 누적/저장 작업을 완료했습니다.');
+    return true;
   } catch (error) {
-    console.error('실시간 데이터 업데이트 중 오류 발생:', error);
+    console.error('스케줄링된 데이터 업데이트 중 오류 발생:', error);
     return false;
   }
 }
 
-// 매일 자정마다 가짜 데이터 1건 추가
+// 매일 자정마다 데이터 누적/추가
 cron.schedule('0 0 * * *', async () => {
   console.log('스케줄러에 의한 데이터 업데이트 작업을 시작합니다...');
   await updateSingleData();
@@ -68,17 +185,15 @@ cron.schedule('0 0 * * *', async () => {
 
 // --- API 엔드포인트들 ---
 
-// [신규] 아두이노(ESP32)에서 실제 센서 데이터를 받기 위한 API
 /**
- * 아두이노(ESP32) 등 외부 장치로부터 센서 데이터를 받아 Firebase에 저장합니다.
+ * [수정] 아두이노(ESP32)에서 실제 센서 데이터를 받아 누적/저장합니다.
  * POST /api/sensor-data
- * 요청 본문(Body) 예시: { "electricity": 350.5, "gas": 12.8 }
+ * 요청 본문(Body) 예시: { "electricity": 0.5, "gas": 0.1 } (누적할 값)
  */
 app.post('/api/sensor-data', async (req, res) => {
-  // 요청 본문에서 electricity와 gas 값을 추출
   const { electricity, gas } = req.body;
 
-  // 데이터 유효성 검사 (두 값 중 하나라도 숫자인지 확인)
+  // 데이터 유효성 검사
   const electricityValue = parseFloat(electricity);
   const gasValue = parseFloat(gas);
 
@@ -88,31 +203,16 @@ app.post('/api/sensor-data', async (req, res) => {
   }
 
   try {
-    const ref = db.ref('sensor_data');
-    const newData = {};
-
-    // electricity 값이 있으면 객체에 추가
-    if (!isNaN(electricityValue)) {
-      newData.electricity = { 
-        value: electricityValue, 
-        timestamp: admin.database.ServerValue.TIMESTAMP 
-      };
-    }
-
-    // gas 값이 있으면 객체에 추가
-    if (!isNaN(gasValue)) {
-      newData.gas = { 
-        value: gasValue, 
-        timestamp: admin.database.ServerValue.TIMESTAMP 
-      };
-    }
-
-    // Firebase에 데이터 저장
-    await ref.push(newData);
+    // 공통 함수 호출
+    const result = await accumulateOrPushData({ electricityValue, gasValue });
     
-    console.log('Arduino/ESP32로부터 새 데이터 수신 및 저장:', newData);
-    res.status(201).json({ message: '데이터가 성공적으로 저장되었습니다.', data: newData });
-
+    if (result.accumulated) {
+      // 기존 레코드에 누적 성공
+      res.status(200).json({ message: '데이터가 성공적으로 누적되었습니다.', key: result.key });
+    } else {
+      // 새 레코드 생성 성공
+      res.status(201).json({ message: '새 데이터가 성공적으로 저장되었습니다.', key: result.key });
+    }
   } catch (error) {
     console.error('센서 데이터 저장 중 오류 발생:', error);
     res.status(500).json({ error: '서버 오류가 발생했습니다.' });
@@ -122,7 +222,9 @@ app.post('/api/sensor-data', async (req, res) => {
 // (기존) 앱에서 사용량 데이터를 요청하는 API
 app.get('/api/usage-data', async (req, res) => {
   try {
-    const snapshot = await db.ref('sensor_data').orderByChild('gas/timestamp').once('value');
+    // 정렬 기준을 'gas/timestamp' -> 'electricity/timestamp'로 변경 (더 안정적일 수 있음)
+    // 또는 .orderByKey()를 사용해도 됩니다.
+    const snapshot = await db.ref('sensor_data').orderByChild('electricity/timestamp').once('value');
     const data = snapshot.val();
 
     if (!data) {
@@ -155,14 +257,14 @@ app.get('/api/usage-data', async (req, res) => {
   }
 });
 
-// (기존) 테스트용: 가짜 데이터를 수동으로 추가하는 API
+// (기존) 테스트용: 데이터를 수동으로 누적/추가하는 API
 app.get('/api/force-update', async (req, res) => {
   console.log('수동으로 실시간 데이터 업데이트 작업을 시작합니다...');
   const success = await updateSingleData();
   if (success) {
-    res.status(200).send('<h1>실시간 데이터 추가 성공!</h1><p>오늘 날짜로 새로운 데이터 1건이 추가되었습니다.</p>');
+    res.status(200).send('<h1>실시간 데이터 누적/추가 성공!</h1><p>데이터가 성공적으로 처리되었습니다.</p>');
   } else {
-    res.status(500).send('<h1>실시간 데이터 추가 실패!</h1><p>Render 로그를 확인해주세요.</p>');
+    res.status(500).send('<h1>실시간 데이터 누적/추가 실패!</h1><p>Render 로그를 확인해주세요.</p>');
   }
 });
 
@@ -174,11 +276,12 @@ app.get('/api/init-historical-data', async (req, res) => {
             return res.status(400).send('<h1>초기화 실패</h1><p>gas_data.json 파일이 없거나 비어있습니다.</p>');
         }
         const ref = db.ref('sensor_data');
-        await ref.set(null);
+        await ref.set(null); // DB 초기화
         for (const item of gasDataJson) {
             const timestamp = new Date(item.month + '-01').getTime();
             const gasValue = item.average;
             const electricityValue = Math.floor(Math.random() * (450 - 250 + 1)) + 250;
+            // 초기화 시에는 누적 로직이 아닌, 개별 push 사용
             await ref.push({
                 electricity: { value: electricityValue, timestamp: timestamp },
                 gas: { value: gasValue, timestamp: timestamp }
