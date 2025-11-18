@@ -36,42 +36,12 @@ try {
 const PORT = process.env.PORT || 3000;
 const db = admin.database();
 
-// --- [신규] 시간 관련 헬퍼 함수 ---
+// --- [삭제] 시간 관련 헬퍼 함수 (더 이상 필요 없음) ---
+
+// --- [수정] 데이터 업데이트 관련 함수 (무조건 최신값에 누적) ---
 
 /**
- * 현재 시간을 KST(한국 표준시) 기준 'YYYY-MM' 문자열로 반환합니다.
- */
-function getCurrentMonthKST() {
-  const now = new Date();
-  const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
-  const kstOffset = 9 * 60 * 60000; // KST는 UTC+9
-  const kstNow = new Date(utc + kstOffset);
-  
-  const year = kstNow.getFullYear();
-  const month = (kstNow.getMonth() + 1).toString().padStart(2, '0');
-  return `${year}-${month}`;
-}
-
-/**
- * 주어진 타임스탬프를 KST(한국 표준시) 기준 'YYYY-MM' 문자열로 반환합니다.
- * @param {number} timestamp - Unix 타임스탬프 (밀리초)
- */
-function getMonthKST(timestamp) {
-  const date = new Date(timestamp);
-  const utc = date.getTime() + (date.getTimezoneOffset() * 60000);
-  const kstOffset = 9 * 60 * 60000; // KST는 UTC+9
-  const kstDate = new Date(utc + kstOffset);
-  
-  const year = kstDate.getFullYear();
-  const month = (kstDate.getMonth() + 1).toString().padStart(2, '0');
-  return `${year}-${month}`;
-}
-
-
-// --- [수정] 데이터 업데이트 관련 함수 (누적 로직) ---
-
-/**
- * [신규] 데이터를 누적하거나 새로 추가하는 공통 함수
+ * [수정] 데이터를 무조건 최신 값에 누적하거나, DB가 비었으면 새로 추가하는 공통 함수
  * @param {object} dataToSave - { electricityValue: number, gasValue: number }
  */
 async function accumulateOrPushData(dataToSave) {
@@ -81,54 +51,46 @@ async function accumulateOrPushData(dataToSave) {
   try {
     // 1. 가장 최근 데이터를 가져옵니다. (push key 기준 정렬)
     const snapshot = await ref.orderByKey().limitToLast(1).once('value');
-    const currentMonth = getCurrentMonthKST(); // 예: "2025-11"
 
     let latestKey = null;
-    let latestData = null;
-    let latestMonth = null;
 
     if (snapshot.exists()) {
       latestKey = Object.keys(snapshot.val())[0];
-      latestData = snapshot.val()[latestKey];
-      
-      // 2. 최근 데이터의 타임스탬프를 확인합니다 (전기/가스 둘 중 하나 기준)
-      const latestTimestamp = latestData.electricity?.timestamp || latestData.gas?.timestamp || 0;
-      if (latestTimestamp > 0) {
-        latestMonth = getMonthKST(latestTimestamp); // 예: "2025-10"
-      }
     }
 
-    // 3. 현재 월과 최근 데이터의 월을 비교합니다.
-    if (latestKey && latestMonth === currentMonth) {
-      // --- 3-1. 같은 달인 경우: 데이터 누적 (Transaction) ---
+    // 3. 최근 데이터의 존재 여부로 판단
+    if (latestKey) {
+      // --- 3-1. 최신 데이터가 있는 경우: 해당 데이터에 누적 (Transaction) ---
       const latestRecordRef = ref.child(latestKey);
       await latestRecordRef.transaction((currentData) => {
         if (currentData === null) {
           return null; // 레코드가 그 사이에 삭제됨. 트랜잭션 중단.
         }
         
+        const newTimestamp = admin.database.ServerValue.TIMESTAMP;
+
         // 전기 값 누적
         if (!isNaN(electricityValue)) {
-          currentData.electricity = currentData.electricity || { value: 0 }; // 없으면 0으로 초기화
+          currentData.electricity = currentData.electricity || { value: 0 };
           currentData.electricity.value = (currentData.electricity.value || 0) + electricityValue;
-          currentData.electricity.timestamp = admin.database.ServerValue.TIMESTAMP;
+          currentData.electricity.timestamp = newTimestamp; // 타임스탬프 업데이트
         }
         
         // 가스 값 누적
         if (!isNaN(gasValue)) {
-          currentData.gas = currentData.gas || { value: 0 }; // 없으면 0으로 초기화
+          currentData.gas = currentData.gas || { value: 0 };
           currentData.gas.value = (currentData.gas.value || 0) + gasValue;
-          currentData.gas.timestamp = admin.database.ServerValue.TIMESTAMP;
+          currentData.gas.timestamp = newTimestamp; // 타임스탬프 업데이트
         }
         
         return currentData; // 수정된 데이터를 반환하여 DB에 저장
       });
       
-      console.log(`[${currentMonth}] 데이터 누적 완료 (Key: ${latestKey}):`, dataToSave);
+      console.log(`[최신 데이터 누적 완료] (Key: ${latestKey}):`, dataToSave);
       return { accumulated: true, key: latestKey };
 
     } else {
-      // --- 3-2. 다른 달이거나 DB가 비어있는 경우: 새 데이터 추가 (Push) ---
+      // --- 3-2. DB가 비어있는 경우: 새 데이터 추가 (Push) ---
       const newData = {};
       const timestamp = admin.database.ServerValue.TIMESTAMP;
       
@@ -141,7 +103,7 @@ async function accumulateOrPushData(dataToSave) {
 
       if (Object.keys(newData).length > 0) {
         const newRecordRef = await ref.push(newData);
-        console.log(`[${currentMonth}] 새 데이터 추가 완료:`, newData);
+        console.log(`[새 데이터 추가 완료] (DB 비어있음):`, newData);
         return { accumulated: false, key: newRecordRef.key };
       }
       return { accumulated: false, key: null }; // 유효한 데이터가 없음
