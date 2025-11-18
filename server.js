@@ -36,8 +36,6 @@ try {
 const PORT = process.env.PORT || 3000;
 const db = admin.database();
 
-// --- [삭제] 시간 관련 헬퍼 함수 (더 이상 필요 없음) ---
-
 // --- [수정] 데이터 업데이트 관련 함수 (무조건 최신값에 누적) ---
 
 /**
@@ -258,7 +256,7 @@ app.get('/api/init-historical-data', async (req, res) => {
 });
 
 
-// --- 사용자 관리 API 엔드포인트들 (기존과 동일) ---
+// --- 사용자 관리 API 엔드포인트들 ---
 
 const usersRef = db.ref('users');
 
@@ -272,11 +270,43 @@ app.get('/api/users', async (req, res) => {
     }
 });
 
+/**
+ * [수정] 사용자 회원가입 (POST /api/users)
+ * - ID, Username 중복 확인 로직 추가
+ */
 app.post('/api/users', async (req, res) => {
     try {
+        const { id, username, password } = req.body; // 새 사용자 정보
+
+        if (!id || !username || !password) {
+            return res.status(400).json({ error: 'id, username, password는 필수 항목입니다.' });
+        }
+
+        // 1. ID 중복 확인
+        // Firebase RTDB에서 'id' 필드값이 일치하는 것을 찾음
+        const idQuery = usersRef.orderByChild('id').equalTo(id);
+        const idSnapshot = await idQuery.once('value');
+        if (idSnapshot.exists()) {
+            // 409 Conflict: 리소스 충돌 (이미 존재함)
+            return res.status(409).json({ error: '이미 사용 중인 아이디입니다.' });
+        }
+
+        // 2. Username 중복 확인
+        // Firebase RTDB에서 'username' 필드값이 일치하는 것을 찾음
+        const usernameQuery = usersRef.orderByChild('username').equalTo(username);
+        const usernameSnapshot = await usernameQuery.once('value');
+        if (usernameSnapshot.exists()) {
+            // 409 Conflict
+            return res.status(409).json({ error: '이미 사용 중인 이름입니다.' });
+        }
+        
+        // 3. 중복 없음 -> 사용자 생성
         const newUserRef = usersRef.push();
-        await newUserRef.set(req.body);
-        res.status(201).json({ id: newUserRef.key, ...req.body });
+        await newUserRef.set({ id, username, password }); // req.body를 통째로 넣는 대신 명시적으로 저장
+        
+        // 201 Created
+        res.status(201).json({ id: newUserRef.key, id, username });
+
     } catch (error) {
         console.error('사용자 추가 오류:', error);
         res.status(500).json({ error: '서버 오류가 발생했습니다.' });
