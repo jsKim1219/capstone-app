@@ -37,7 +37,6 @@ const PORT = process.env.PORT || 3000;
 const db = admin.database();
 
 // --- 데이터 업데이트 관련 함수 ---
-
 async function accumulateOrPushData(dataToSave) {
   const { electricityValue, gasValue } = dataToSave;
   const ref = db.ref('sensor_data');
@@ -108,7 +107,6 @@ cron.schedule('0 0 * * *', async () => {
 });
 
 // --- API 엔드포인트 ---
-
 app.post('/api/sensor-data', async (req, res) => {
   const { electricity, gas } = req.body;
   const electricityValue = parseFloat(electricity);
@@ -172,27 +170,42 @@ app.get('/api/init-historical-data', async (req, res) => {
 
 const usersRef = db.ref('users');
 
+/**
+ * [수정 완료] 사용자 조회 (GET /api/users)
+ * - ownerId 쿼리 파라미터가 있으면 해당 주인의 데이터만 필터링해서 반환
+ */
 app.get('/api/users', async (req, res) => {
     try {
+        const ownerId = req.query.ownerId; // 요청에서 ownerId 확인
         const snapshot = await usersRef.once('value');
-        res.status(200).json(snapshot.val() || {});
+        const allUsers = snapshot.val() || {};
+
+        if (ownerId) {
+            // ownerId가 있으면 필터링 수행
+            const filteredUsers = {};
+            for (const [key, user] of Object.entries(allUsers)) {
+                // 1. 내가 만든 유저 (user.ownerId == ownerId)
+                // 2. 또는 나 자신 (user.id == ownerId) -> 이건 선택사항이나 포함해둠
+                if (user.ownerId === ownerId || user.id === ownerId) {
+                    filteredUsers[key] = user;
+                }
+            }
+            res.status(200).json(filteredUsers);
+        } else {
+            // ownerId가 없으면 전체 반환 (기존 호환성 유지)
+            res.status(200).json(allUsers);
+        }
     } catch (error) {
+        console.error('사용자 조회 오류:', error);
         res.status(500).json({ error: '서버 오류' });
     }
 });
 
-/**
- * [수정 완료] 사용자 추가 (회원가입 + 단순 친구 추가 통합)
- * - 비밀번호가 있으면 '회원가입'
- * - 이름만 있으면 '단순 추가'로 판단하여 저장 허용
- */
 app.post('/api/users', async (req, res) => {
     try {
-        // 1. 회원가입 요청인지 확인 (ID와 Password가 있는 경우)
+        // 1. 회원가입 (ID/PW 있음)
         if (req.body.id && req.body.password) {
             const { id, username, password } = req.body;
-            
-            // 중복 확인
             const idSnapshot = await usersRef.orderByChild('id').equalTo(id).once('value');
             if (idSnapshot.exists()) return res.status(409).json({ error: '이미 사용 중인 아이디입니다.' });
             
@@ -204,23 +217,22 @@ app.post('/api/users', async (req, res) => {
             return res.status(201).json({ id: newUserRef.key, message: '회원가입 성공' });
         } 
         
-        // 2. 단순 사용자(친구/가족) 추가 요청인 경우 (Name만 있는 경우)
+        // 2. 단순 사용자 추가 (이름만 있음)
         else if (req.body.name) {
             const newUserRef = usersRef.push();
-            // 요청받은 데이터(이름, 역할, 이미지 등)를 그대로 저장
-            await newUserRef.set(req.body);
-            console.log("단순 사용자 추가됨:", req.body.name);
+            // ownerId가 포함된 body를 그대로 저장
+            await newUserRef.set(req.body); 
+            console.log("단순 사용자 추가됨:", req.body.name, "Owner:", req.body.ownerId);
             return res.status(201).json({ id: newUserRef.key, message: '사용자 추가 성공' });
         }
 
-        // 3. 필수 정보 누락
         else {
-            return res.status(400).json({ error: '필수 정보(id/pw 또는 name)가 없습니다.' });
+            return res.status(400).json({ error: '필수 정보가 없습니다.' });
         }
 
     } catch (error) {
         console.error('사용자 추가 오류:', error);
-        res.status(500).json({ error: '서버 오류가 발생했습니다.' });
+        res.status(500).json({ error: '서버 오류' });
     }
 });
 
