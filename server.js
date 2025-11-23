@@ -183,6 +183,8 @@ app.get('/api/users', async (req, res) => {
 
 /**
  * [수정 완료] 사용자 추가 (회원가입 + 단순 친구 추가 통합)
+ * - 비밀번호가 있으면 '회원가입'
+ * - 이름만 있으면 '단순 추가'로 판단하여 저장 허용
  */
 app.post('/api/users', async (req, res) => {
     try {
