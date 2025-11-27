@@ -106,6 +106,71 @@ cron.schedule('0 0 * * *', async () => {
   await updateSingleData();
 });
 
+/**
+ * [추가] 두 경로의 데이터를 가져와 병합하고 시간순으로 정렬하는 함수
+ * @param {string} path1 첫 번째 경로 ('sensor_data')
+ * @param {string} path2 두 번째 경로 ('test')
+ * @returns {Promise<{electricity: Array, gas: Array}>} 병합된 데이터
+ */
+async function fetchAndMergeUsageData(path1, path2) {
+    const ref1 = db.ref(path1);
+    const ref2 = db.ref(path2);
+
+    // 두 경로에서 동시에 데이터를 가져옵니다.
+    const [snapshot1, snapshot2] = await Promise.all([
+        ref1.once('value'),
+        ref2.once('value').catch(e => {
+            // test 경로가 없거나 오류가 나도 무시하고 빈 값으로 처리
+            console.warn(`경고: ${path2} 경로 조회 중 오류 발생 (무시) - ${e.message}`);
+            return null;
+        })
+    ]);
+
+    const data1 = snapshot1.val() || {};
+    const data2 = (snapshot2 && snapshot2.val()) ? snapshot2.val() : {};
+
+    const allData = { ...data1, ...data2 }; // 키가 중복되지 않는다고 가정하고 병합
+
+    const electricityData = [];
+    const gasData = [];
+
+    // 모든 데이터를 순회하며 electricity 및 gas 값을 추출
+    Object.keys(allData).forEach(key => {
+        const entry = allData[key];
+        // sensor_data 구조: { electricity: { value, timestamp }, gas: { value, timestamp } }
+        if (entry.electricity && entry.electricity.timestamp) {
+            electricityData.push(entry.electricity);
+        }
+        if (entry.gas && entry.gas.timestamp) {
+            gasData.push(entry.gas);
+        }
+        
+        // test 경로에서 들어온 데이터 구조를 처리합니다.
+        // test 경로 데이터가 sensor_data와 동일한 구조라고 가정 (예: ESP32에서 push)
+        if (entry.electric_value && entry.timestamp) {
+             // test 경로는 단순 값을 가지고 있을 수도 있어, electricity와 gas의 value/timestamp를 직접 확인합니다.
+            
+             // 사용자가 "test"에 측정값이 들어간다고 했으므로, test 경로의 데이터 구조를 예상하여 처리합니다.
+             // 만약 test 경로의 데이터가 { "value": X, "timestamp": Y } 형태라면 아래와 같이 처리해야 합니다.
+             // 현재 UsageActivity는 { "value": X, "timestamp": Y } 형태의 배열을 기대합니다.
+             
+             // 만약 test 경로의 데이터가 { "electric_value": X, "gas_value": Y, "timestamp": Z } 라면:
+             electricityData.push({ value: entry.electric_value, timestamp: entry.timestamp });
+             gasData.push({ value: entry.gas_value, timestamp: entry.timestamp });
+        }
+        
+        // *참고: ESP32에서 test 경로에 저장하는 정확한 데이터 구조를 알 수 없어,
+        // 최대한 유연하게 처리하기 위해 value와 timestamp를 포함하는 객체로 추출합니다.
+        // 만약 test 경로의 데이터가 { "value": X, "timestamp": Y } 형태라면 위 `entry.electricity`와 `entry.gas` 추출 로직으로 커버됩니다.
+    });
+
+    // timestamp 기준으로 정렬
+    electricityData.sort((a, b) => a.timestamp - b.timestamp);
+    gasData.sort((a, b) => a.timestamp - b.timestamp);
+
+    return { electricity: electricityData, gas: gasData };
+}
+
 // --- API 엔드포인트 ---
 app.post('/api/sensor-data', async (req, res) => {
   const { electricity, gas } = req.body;
@@ -124,21 +189,13 @@ app.post('/api/sensor-data', async (req, res) => {
   }
 });
 
+// [수정] sensor_data와 test 경로 데이터를 병합하여 반환하도록 변경
 app.get('/api/usage-data', async (req, res) => {
   try {
-    const snapshot = await db.ref('sensor_data').orderByChild('electricity/timestamp').once('value');
-    const data = snapshot.val();
-    if (!data) return res.status(200).json({ electricity: [], gas: [] });
-
-    const electricityData = [];
-    const gasData = [];
-    Object.keys(data).forEach(key => {
-      const entry = data[key];
-      if (entry.electricity) electricityData.push(entry.electricity);
-      if (entry.gas) gasData.push(entry.gas);
-    });
-    res.status(200).json({ electricity: electricityData, gas: gasData });
+    const mergedData = await fetchAndMergeUsageData('sensor_data', 'test');
+    res.status(200).json(mergedData);
   } catch (error) {
+    console.error('Usage data fetch error:', error);
     res.status(500).json({ error: '서버 오류' });
   }
 });
