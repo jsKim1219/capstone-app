@@ -107,20 +107,15 @@ cron.schedule('0 0 * * *', async () => {
 });
 
 /**
- * [추가] 두 경로의 데이터를 가져와 병합하고 시간순으로 정렬하는 함수
- * @param {string} path1 첫 번째 경로 ('sensor_data')
- * @param {string} path2 두 번째 경로 ('test')
- * @returns {Promise<{electricity: Array, gas: Array}>} 병합된 데이터
+ * sensor_data와 test 경로 데이터를 가져와 병합하고 시간순으로 정렬하는 함수
  */
 async function fetchAndMergeUsageData(path1, path2) {
     const ref1 = db.ref(path1);
     const ref2 = db.ref(path2);
 
-    // 두 경로에서 동시에 데이터를 가져옵니다.
     const [snapshot1, snapshot2] = await Promise.all([
         ref1.once('value'),
         ref2.once('value').catch(e => {
-            // test 경로가 없거나 오류가 나도 무시하고 빈 값으로 처리
             console.warn(`경고: ${path2} 경로 조회 중 오류 발생 (무시) - ${e.message}`);
             return null;
         })
@@ -129,39 +124,30 @@ async function fetchAndMergeUsageData(path1, path2) {
     const data1 = snapshot1.val() || {};
     const data2 = (snapshot2 && snapshot2.val()) ? snapshot2.val() : {};
 
-    const allData = { ...data1, ...data2 }; // 키가 중복되지 않는다고 가정하고 병합
+    const allData = { ...data1, ...data2 }; 
 
     const electricityData = [];
     const gasData = [];
 
-    // 모든 데이터를 순회하며 electricity 및 gas 값을 추출
+    // [수정된 로직] 모든 데이터를 순회하며 다양한 구조 포괄적으로 추출
     Object.keys(allData).forEach(key => {
         const entry = allData[key];
-        // sensor_data 구조: { electricity: { value, timestamp }, gas: { value, timestamp } }
-        if (entry.electricity && entry.electricity.timestamp) {
-            electricityData.push(entry.electricity);
+        
+        // 1. sensor_data 구조: { electricity: { value, timestamp }, gas: { value, timestamp } }
+        if (entry.electricity && entry.electricity.value !== undefined && entry.electricity.timestamp) {
+            electricityData.push({ value: entry.electricity.value, timestamp: entry.electricity.timestamp });
         }
-        if (entry.gas && entry.gas.timestamp) {
-            gasData.push(entry.gas);
+        if (entry.gas && entry.gas.value !== undefined && entry.gas.timestamp) {
+            gasData.push({ value: entry.gas.value, timestamp: entry.gas.timestamp });
         }
         
-        // test 경로에서 들어온 데이터 구조를 처리합니다.
-        // test 경로 데이터가 sensor_data와 동일한 구조라고 가정 (예: ESP32에서 push)
-        if (entry.electric_value && entry.timestamp) {
-             // test 경로는 단순 값을 가지고 있을 수도 있어, electricity와 gas의 value/timestamp를 직접 확인합니다.
-            
-             // 사용자가 "test"에 측정값이 들어간다고 했으므로, test 경로의 데이터 구조를 예상하여 처리합니다.
-             // 만약 test 경로의 데이터가 { "value": X, "timestamp": Y } 형태라면 아래와 같이 처리해야 합니다.
-             // 현재 UsageActivity는 { "value": X, "timestamp": Y } 형태의 배열을 기대합니다.
-             
-             // 만약 test 경로의 데이터가 { "electric_value": X, "gas_value": Y, "timestamp": Z } 라면:
+        // 2. test 경로에서 들어올 수 있는 구조 (예: { electric_value: X, gas_value: Y, timestamp: Z })
+        if (entry.electric_value !== undefined && entry.timestamp) {
              electricityData.push({ value: entry.electric_value, timestamp: entry.timestamp });
+        }
+        if (entry.gas_value !== undefined && entry.timestamp) {
              gasData.push({ value: entry.gas_value, timestamp: entry.timestamp });
         }
-        
-        // *참고: ESP32에서 test 경로에 저장하는 정확한 데이터 구조를 알 수 없어,
-        // 최대한 유연하게 처리하기 위해 value와 timestamp를 포함하는 객체로 추출합니다.
-        // 만약 test 경로의 데이터가 { "value": X, "timestamp": Y } 형태라면 위 `entry.electricity`와 `entry.gas` 추출 로직으로 커버됩니다.
     });
 
     // timestamp 기준으로 정렬
@@ -170,6 +156,22 @@ async function fetchAndMergeUsageData(path1, path2) {
 
     return { electricity: electricityData, gas: gasData };
 }
+
+/**
+ * [추가된 함수] realtime_env에서 현재 온습도 데이터를 가져옵니다.
+ */
+async function fetchRealtimeEnvData() {
+    const realtimeRef = db.ref('realtime_env');
+    const snapshot = await realtimeRef.once('value');
+    const data = snapshot.val() || {};
+    
+    // temp와 humidity가 없으면 0.0을 반환 (UsageActivity에서 처리하기 위함)
+    return {
+        realtime_temp: data.temp !== undefined ? data.temp : 0.0,
+        realtime_humidity: data.humidity !== undefined ? data.humidity : 0.0
+    };
+}
+
 
 // --- API 엔드포인트 ---
 app.post('/api/sensor-data', async (req, res) => {
@@ -189,11 +191,24 @@ app.post('/api/sensor-data', async (req, res) => {
   }
 });
 
-// [수정] sensor_data와 test 경로 데이터를 병합하여 반환하도록 변경
+/**
+ * [수정됨] sensor_data, test, 그리고 realtime_env 데이터를 병합하여 반환합니다.
+ */
 app.get('/api/usage-data', async (req, res) => {
   try {
+    // 1. 월별 누적 및 테스트 데이터 가져오기
     const mergedData = await fetchAndMergeUsageData('sensor_data', 'test');
-    res.status(200).json(mergedData);
+    
+    // 2. 실시간 환경 데이터 가져오기
+    const realtimeData = await fetchRealtimeEnvData();
+    
+    // 3. 두 데이터를 합쳐서 클라이언트에 전송
+    const responseData = {
+        ...mergedData,
+        ...realtimeData // realtime_temp, realtime_humidity 필드가 추가됨
+    };
+    
+    res.status(200).json(responseData);
   } catch (error) {
     console.error('Usage data fetch error:', error);
     res.status(500).json({ error: '서버 오류' });
@@ -223,33 +238,25 @@ app.get('/api/init-historical-data', async (req, res) => {
     }
 });
 
-// --- 사용자 관리 API (수정된 부분) ---
+// --- 사용자 관리 API ---
 
 const usersRef = db.ref('users');
 
-/**
- * [수정 완료] 사용자 조회 (GET /api/users)
- * - ownerId 쿼리 파라미터가 있으면 해당 주인의 데이터만 필터링해서 반환
- */
 app.get('/api/users', async (req, res) => {
     try {
-        const ownerId = req.query.ownerId; // 요청에서 ownerId 확인
+        const ownerId = req.query.ownerId; 
         const snapshot = await usersRef.once('value');
         const allUsers = snapshot.val() || {};
 
         if (ownerId) {
-            // ownerId가 있으면 필터링 수행
             const filteredUsers = {};
             for (const [key, user] of Object.entries(allUsers)) {
-                // 1. 내가 만든 유저 (user.ownerId == ownerId)
-                // 2. 또는 나 자신 (user.id == ownerId) -> 이건 선택사항이나 포함해둠
                 if (user.ownerId === ownerId || user.id === ownerId) {
                     filteredUsers[key] = user;
                 }
             }
             res.status(200).json(filteredUsers);
         } else {
-            // ownerId가 없으면 전체 반환 (기존 호환성 유지)
             res.status(200).json(allUsers);
         }
     } catch (error) {
@@ -258,37 +265,45 @@ app.get('/api/users', async (req, res) => {
     }
 });
 
+// [수정됨] 회원가입과 단순 사용자 추가 로직 분리 및 ID/Username 중복 검사
 app.post('/api/users', async (req, res) => {
     try {
-        // 1. 회원가입 (ID/PW 있음)
-        if (req.body.id && req.body.password) {
+        // 1. 회원가입 (ID, PW, Username 필수)
+        if (req.body.id && req.body.password && req.body.username) {
             const { id, username, password } = req.body;
+            
+            // ID 중복 검사
             const idSnapshot = await usersRef.orderByChild('id').equalTo(id).once('value');
             if (idSnapshot.exists()) return res.status(409).json({ error: '이미 사용 중인 아이디입니다.' });
             
+            // Username 중복 검사 
             const usernameSnapshot = await usersRef.orderByChild('username').equalTo(username).once('value');
             if (usernameSnapshot.exists()) return res.status(409).json({ error: '이미 사용 중인 이름입니다.' });
 
             const newUserRef = usersRef.push();
-            await newUserRef.set({ id, username, password });
+            await newUserRef.set({ id, username, password }); 
             return res.status(201).json({ id: newUserRef.key, message: '회원가입 성공' });
         } 
         
-        // 2. 단순 사용자 추가 (이름만 있음)
-        else if (req.body.name) {
+        // 2. 단순 사용자 추가 (Name, OwnerId 필수, ID/PW 없음)
+        else if (req.body.name && req.body.ownerId && !req.body.id && !req.body.password) {
             const newUserRef = usersRef.push();
-            // ownerId가 포함된 body를 그대로 저장
-            await newUserRef.set(req.body); 
-            console.log("단순 사용자 추가됨:", req.body.name, "Owner:", req.body.ownerId);
+            const userData = {
+                name: req.body.name,
+                ownerId: req.body.ownerId, 
+                imageUrl: req.body.imageUrl || null
+            };
+            await newUserRef.set(userData); 
+            console.log("단순 사용자 추가됨:", userData.name, "Owner:", userData.ownerId);
             return res.status(201).json({ id: newUserRef.key, message: '사용자 추가 성공' });
         }
 
         else {
-            return res.status(400).json({ error: '필수 정보가 없습니다.' });
+            return res.status(400).json({ error: '필수 정보가 부족하거나 형식이 잘못되었습니다.' });
         }
 
     } catch (error) {
-        console.error('사용자 추가 오류:', error);
+        console.error('사용자 추가/가입 오류:', error);
         res.status(500).json({ error: '서버 오류' });
     }
 });
