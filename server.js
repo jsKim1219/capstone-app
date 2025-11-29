@@ -129,7 +129,7 @@ async function fetchAndMergeUsageData(path1, path2) {
     const electricityData = [];
     const gasData = [];
 
-    // [수정된 로직] 모든 데이터를 순회하며 다양한 구조 포괄적으로 추출
+    // 모든 데이터를 순회하며 다양한 구조 포괄적으로 추출
     Object.keys(allData).forEach(key => {
         const entry = allData[key];
         
@@ -158,30 +158,28 @@ async function fetchAndMergeUsageData(path1, path2) {
 }
 
 /**
- * [수정 완료] realtime_env에서 현재 온습도 및 센서 데이터를 가져옵니다.
- * - 값이 유효한 숫자인지 확인하는 헬퍼 함수를 사용하여 안전성을 높입니다.
+ * 값이 유효한 숫자인지 확인하고 변환하는 헬퍼 함수
  */
 function getValidNumber(value) {
     if (value === null || value === undefined) return 0.0;
     const num = parseFloat(value);
-    // isFinite는 NaN, Infinity, -Infinity가 아닌지 확인합니다.
     return isFinite(num) ? num : 0.0;
 }
 
+/**
+ * [수정됨] realtime_env에서 필요한 데이터를 가져옵니다.
+ */
 async function fetchRealtimeEnvData() {
     const realtimeRef = db.ref('realtime_env');
     const snapshot = await realtimeRef.once('value');
     const data = snapshot.val() || {};
     
-    // getValidNumber 함수를 사용하여 데이터가 문자열이거나 유효하지 않은 숫자일 때 0.0을 반환하도록 처리
+    // MainActivity에서 요구하는 power_W를 포함시킵니다.
     return {
-        // MainActivity에서 사용하는 필드
         realtime_temp: getValidNumber(data.temp),
         realtime_humidity: getValidNumber(data.humidity),
-        
-        // UsageActivity에서 사용하는 필드
-        realtime_electricity_kwh: getValidNumber(data.electricity_kwh),
-        realtime_gas: getValidNumber(data.gas)
+        realtime_gas: getValidNumber(data.gas),
+        realtime_power_W: getValidNumber(data.power_W) // 추가: power_W
     };
 }
 
@@ -209,16 +207,16 @@ app.post('/api/sensor-data', async (req, res) => {
  */
 app.get('/api/usage-data', async (req, res) => {
   try {
-    // 1. 월별 누적 및 테스트 데이터 가져오기
+    // 1. 월별 누적 및 테스트 데이터 가져오기 (지난 달 비교값은 여기서 나옴)
     const mergedData = await fetchAndMergeUsageData('sensor_data', 'test');
     
-    // 2. 실시간 환경 데이터 가져오기 (이제 안전한 값을 반환함)
+    // 2. 실시간 환경 데이터 가져오기 (realtime_power_W 포함)
     const realtimeData = await fetchRealtimeEnvData();
     
     // 3. 두 데이터를 합쳐서 클라이언트에 전송
     const responseData = {
         ...mergedData,
-        ...realtimeData // 모든 실시간 필드가 포함됨
+        ...realtimeData // 모든 실시간 필드가 포함됨 (realtime_power_W 포함)
     };
     
     res.status(200).json(responseData);
@@ -278,7 +276,7 @@ app.get('/api/users', async (req, res) => {
     }
 });
 
-// [수정됨] 회원가입과 단순 사용자 추가 로직 분리 및 ID/Username 중복 검사
+// 회원가입 및 사용자 추가
 app.post('/api/users', async (req, res) => {
     try {
         // 1. 회원가입 (ID, PW, Username 필수)
