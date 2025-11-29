@@ -159,21 +159,29 @@ async function fetchAndMergeUsageData(path1, path2) {
 
 /**
  * [수정 완료] realtime_env에서 현재 온습도 및 센서 데이터를 가져옵니다.
+ * - 값이 유효한 숫자인지 확인하는 헬퍼 함수를 사용하여 안전성을 높입니다.
  */
+function getValidNumber(value) {
+    if (value === null || value === undefined) return 0.0;
+    const num = parseFloat(value);
+    // isFinite는 NaN, Infinity, -Infinity가 아닌지 확인합니다.
+    return isFinite(num) ? num : 0.0;
+}
+
 async function fetchRealtimeEnvData() {
     const realtimeRef = db.ref('realtime_env');
     const snapshot = await realtimeRef.once('value');
     const data = snapshot.val() || {};
     
-    // 앱에서 필요한 모든 실시간 필드를 추가합니다.
+    // getValidNumber 함수를 사용하여 데이터가 문자열이거나 유효하지 않은 숫자일 때 0.0을 반환하도록 처리
     return {
-        // MainActivity에서 사용하는 필드 (UsageActivity에서는 사용하지 않음)
-        realtime_temp: data.temp !== undefined ? data.temp : 0.0,
-        realtime_humidity: data.humidity !== undefined ? data.humidity : 0.0,
+        // MainActivity에서 사용하는 필드
+        realtime_temp: getValidNumber(data.temp),
+        realtime_humidity: getValidNumber(data.humidity),
         
         // UsageActivity에서 사용하는 필드
-        realtime_electricity_kwh: data.electricity_kwh !== undefined ? data.electricity_kwh : 0.0,
-        realtime_gas: data.gas !== undefined ? data.gas : 0.0
+        realtime_electricity_kwh: getValidNumber(data.electricity_kwh),
+        realtime_gas: getValidNumber(data.gas)
     };
 }
 
@@ -204,13 +212,13 @@ app.get('/api/usage-data', async (req, res) => {
     // 1. 월별 누적 및 테스트 데이터 가져오기
     const mergedData = await fetchAndMergeUsageData('sensor_data', 'test');
     
-    // 2. 실시간 환경 데이터 가져오기
+    // 2. 실시간 환경 데이터 가져오기 (이제 안전한 값을 반환함)
     const realtimeData = await fetchRealtimeEnvData();
     
     // 3. 두 데이터를 합쳐서 클라이언트에 전송
     const responseData = {
         ...mergedData,
-        ...realtimeData // realtime_temp, realtime_humidity, realtime_electricity_kwh, realtime_gas 필드가 추가됨
+        ...realtimeData // 모든 실시간 필드가 포함됨
     };
     
     res.status(200).json(responseData);
