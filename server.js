@@ -158,17 +158,22 @@ async function fetchAndMergeUsageData(path1, path2) {
 }
 
 /**
- * [추가된 함수] realtime_env에서 현재 온습도 데이터를 가져옵니다.
+ * [수정 완료] realtime_env에서 현재 온습도 및 센서 데이터를 가져옵니다.
  */
 async function fetchRealtimeEnvData() {
     const realtimeRef = db.ref('realtime_env');
     const snapshot = await realtimeRef.once('value');
     const data = snapshot.val() || {};
     
-    // temp와 humidity가 없으면 0.0을 반환 (UsageActivity에서 처리하기 위함)
+    // 앱에서 필요한 모든 실시간 필드를 추가합니다.
     return {
+        // MainActivity에서 사용하는 필드 (UsageActivity에서는 사용하지 않음)
         realtime_temp: data.temp !== undefined ? data.temp : 0.0,
-        realtime_humidity: data.humidity !== undefined ? data.humidity : 0.0
+        realtime_humidity: data.humidity !== undefined ? data.humidity : 0.0,
+        
+        // UsageActivity에서 사용하는 필드
+        realtime_electricity_kwh: data.electricity_kwh !== undefined ? data.electricity_kwh : 0.0,
+        realtime_gas: data.gas !== undefined ? data.gas : 0.0
     };
 }
 
@@ -205,7 +210,7 @@ app.get('/api/usage-data', async (req, res) => {
     // 3. 두 데이터를 합쳐서 클라이언트에 전송
     const responseData = {
         ...mergedData,
-        ...realtimeData // realtime_temp, realtime_humidity 필드가 추가됨
+        ...realtimeData // realtime_temp, realtime_humidity, realtime_electricity_kwh, realtime_gas 필드가 추가됨
     };
     
     res.status(200).json(responseData);
@@ -234,7 +239,7 @@ app.get('/api/init-historical-data', async (req, res) => {
         }
         res.status(200).send('초기화 성공');
     } catch(error) {
-        res.status(500).send('오류 발생');
+        res.status(500).json({ error: '오류 발생' });
     }
 });
 
