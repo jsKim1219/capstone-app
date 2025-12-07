@@ -53,19 +53,10 @@ function getCurrentDatePaths() {
 }
 
 /**
- * [추가됨] 클라이언트가 찾는 경로에 일별 누적 사용량(kWh)을 기록합니다.
+ * [제거됨] 더 이상 monthly_energy에 누적 kWh를 기록하지 않습니다.
+ * 클라이언트가 power_W를 사용하도록 변경되었으므로 이 함수는 제거합니다.
  */
-async function updateDailyKwh(latestDailyKwh) {
-    const { monthKey, dayKey } = getCurrentDatePaths();
-    // Path: monthly_energy/YYYY-MM/YYYY-MM-DD
-    const dailyKwhRef = db.ref(`monthly_energy/${monthKey}/${dayKey}`); 
-
-    // daily_kwh 필드만 업데이트
-    await dailyKwhRef.update({
-        daily_kwh: latestDailyKwh
-    });
-    console.log(`[Daily KWh 업데이트] 경로: monthly_energy/${monthKey}/${dayKey}, 값: ${latestDailyKwh}`);
-}
+// async function updateDailyKwh(latestDailyKwh) { ... }
 
 
 async function accumulateOrPushData(dataToSave) {
@@ -126,10 +117,7 @@ async function updateSingleData() {
     const latestGasData = (gasDataJson.length > 0) ? gasDataJson[gasDataJson.length - 1].average : 0;
     await accumulateOrPushData({ electricityValue: powerData, gasValue: latestGasData });
     
-    // [추가된 로직] 클라이언트가 리스닝하는 경로에 누적 값 기록
-    // (실제 누적 로직이 없으므로 사용자가 보고 싶어하는 값을 임시로 기록합니다.)
-    const cumulativeKwhPlaceholder = 23.753;
-    await updateDailyKwh(cumulativeKwhPlaceholder);
+    // [제거됨] monthly_energy 업데이트 로직 제거
     
     return true;
   } catch (error) {
