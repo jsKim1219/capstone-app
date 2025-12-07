@@ -53,10 +53,36 @@ function getCurrentDatePaths() {
 }
 
 /**
- * [제거됨] 더 이상 monthly_energy에 누적 kWh를 기록하지 않습니다.
- * 클라이언트가 power_W를 사용하도록 변경되었으므로 이 함수는 제거합니다.
+ * [재적용] 클라이언트가 찾는 경로에 일별 누적 사용량(kWh)을 기록합니다.
+ * 트랜잭션을 사용하여 기존 값에 증분량을 더합니다.
+ * @param {number} dailyPowerIncrementWh - 현재 업데이트 주기 동안의 전력 증분량 (Wh)
  */
-// async function updateDailyKwh(latestDailyKwh) { ... }
+async function updateDailyKwh(dailyPowerIncrementWh) {
+    const { monthKey, dayKey } = getCurrentDatePaths();
+    // Path: monthly_energy/YYYY-MM/YYYY-MM-DD
+    const dailyKwhRef = db.ref(`monthly_energy/${monthKey}/${dayKey}`); 
+
+    try {
+        await dailyKwhRef.transaction((currentData) => {
+            let currentKwh = 0;
+            if (currentData && currentData.daily_kwh) {
+                currentKwh = currentData.daily_kwh;
+            }
+    
+            // Wh 증분량을 kWh로 변환하여 기존 값에 더함 (1000 Wh = 1 kWh)
+            const incrementKwh = dailyPowerIncrementWh / 1000.0;
+            const newKwh = currentKwh + incrementKwh;
+    
+            const newData = currentData || {};
+            newData.daily_kwh = parseFloat(newKwh.toFixed(3)); // 소수점 셋째 자리까지 유지
+            
+            return newData;
+        });
+        console.log(`[Daily KWh 업데이트] 경로: monthly_energy/${monthKey}/${dayKey}, 증분: ${dailyPowerIncrementWh} Wh`);
+    } catch(error) {
+        console.error(`Daily KWh 트랜잭션 오류: ${error}`);
+    }
+}
 
 
 async function accumulateOrPushData(dataToSave) {
@@ -115,9 +141,12 @@ async function updateSingleData() {
   try {
     const powerData = Math.floor(Math.random() * (450 - 250 + 1)) + 250;
     const latestGasData = (gasDataJson.length > 0) ? gasDataJson[gasDataJson.length - 1].average : 0;
+    
+    // 1. sensor_data에 누적
     await accumulateOrPushData({ electricityValue: powerData, gasValue: latestGasData });
     
-    // [제거됨] monthly_energy 업데이트 로직 제거
+    // 2. [핵심 재적용] 클라이언트가 리스닝하는 경로에 실시간 일별 누적 값 업데이트 (Wh -> kWh)
+    await updateDailyKwh(powerData); 
     
     return true;
   } catch (error) {
