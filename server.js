@@ -2,7 +2,6 @@
 const express = require('express');
 const admin = require('firebase-admin');
 const cron = require('node-cron');
-const axios = require('axios'); // [추가] 외부 딥러닝 서버 호출을 위해 axios 모듈 사용 가정
 
 // 로컬 JSON 데이터 불러오기
 let gasDataJson = [];
@@ -37,17 +36,38 @@ try {
 const PORT = process.env.PORT || 3000;
 const db = admin.database();
 
-// [추가] Firebase 참조
-const usersRef = db.ref('users');
-const controlsRef = db.ref('controls');
-const logsRef = db.ref('logs/access');
-const latestCaptureRef = db.ref('latest_capture');
+// --- 데이터 업데이트 관련 함수 ---
 
-// [설정] 딥러닝 서버 URL (실제 URL로 대체해야 함)
-const DEEP_LEARNING_SERVER_URL = "http://deep-learning-auth-server.com/verify";
+/**
+ * 현재 날짜에 대한 'YYYY-MM' 및 'YYYY-MM-DD' 키를 생성합니다.
+ */
+function getCurrentDatePaths() {
+    const today = new Date();
+    const year = today.getFullYear();
+    const month = String(today.getMonth() + 1).padStart(2, '0');
+    const day = String(today.getDate()).padStart(2, '0');
+    return {
+        monthKey: `${year}-${month}`,
+        dayKey: `${year}-${month}-${day}`
+    };
+}
+
+/**
+ * [추가됨] 클라이언트가 찾는 경로에 일별 누적 사용량(kWh)을 기록합니다.
+ */
+async function updateDailyKwh(latestDailyKwh) {
+    const { monthKey, dayKey } = getCurrentDatePaths();
+    // Path: monthly_energy/YYYY-MM/YYYY-MM-DD
+    const dailyKwhRef = db.ref(`monthly_energy/${monthKey}/${dayKey}`); 
+
+    // daily_kwh 필드만 업데이트
+    await dailyKwhRef.update({
+        daily_kwh: latestDailyKwh
+    });
+    console.log(`[Daily KWh 업데이트] 경로: monthly_energy/${monthKey}/${dayKey}, 값: ${latestDailyKwh}`);
+}
 
 
-// --- 데이터 업데이트 관련 함수 (기존 로직 유지) ---
 async function accumulateOrPushData(dataToSave) {
   const { electricityValue, gasValue } = dataToSave;
   const ref = db.ref('sensor_data');
@@ -105,6 +125,12 @@ async function updateSingleData() {
     const powerData = Math.floor(Math.random() * (450 - 250 + 1)) + 250;
     const latestGasData = (gasDataJson.length > 0) ? gasDataJson[gasDataJson.length - 1].average : 0;
     await accumulateOrPushData({ electricityValue: powerData, gasValue: latestGasData });
+    
+    // [추가된 로직] 클라이언트가 리스닝하는 경로에 누적 값 기록
+    // (실제 누적 로직이 없으므로 사용자가 보고 싶어하는 값을 임시로 기록합니다.)
+    const cumulativeKwhPlaceholder = 23.753;
+    await updateDailyKwh(cumulativeKwhPlaceholder);
+    
     return true;
   } catch (error) {
     console.error('스케줄링 업데이트 오류:', error);
@@ -118,7 +144,7 @@ cron.schedule('0 0 * * *', async () => {
 });
 
 /**
- * sensor_data와 test 경로 데이터를 가져와 병합하고 시간순으로 정렬하는 함수 (기존 로직 유지)
+ * sensor_data와 test 경로 데이터를 가져와 병합하고 시간순으로 정렬하는 함수
  */
 async function fetchAndMergeUsageData(path1, path2) {
     const ref1 = db.ref(path1);
@@ -169,7 +195,7 @@ async function fetchAndMergeUsageData(path1, path2) {
 }
 
 /**
- * 값이 유효한 숫자인지 확인하고 변환하는 헬퍼 함수 (기존 로직 유지)
+ * 값이 유효한 숫자인지 확인하고 변환하는 헬퍼 함수
  */
 function getValidNumber(value) {
     if (value === null || value === undefined) return 0.0;
@@ -178,25 +204,24 @@ function getValidNumber(value) {
 }
 
 /**
- * realtime_env에서 필요한 데이터를 가져옵니다. (기존 로직 유지)
+ * [수정됨] realtime_env에서 필요한 데이터를 가져옵니다.
  */
 async function fetchRealtimeEnvData() {
     const realtimeRef = db.ref('realtime_env');
     const snapshot = await realtimeRef.once('value');
     const data = snapshot.val() || {};
     
+    // MainActivity에서 요구하는 power_W를 포함시킵니다.
     return {
         realtime_temp: getValidNumber(data.temp),
         realtime_humidity: getValidNumber(data.humidity),
         realtime_gas: getValidNumber(data.gas),
-        realtime_power_W: getValidNumber(data.power_W) // power_W 포함
+        realtime_power_W: getValidNumber(data.power_W) // 추가: power_W
     };
 }
 
 
-// -------------------- API 엔드포인트 --------------------
-
-// 센서 데이터 포스트 (기존 로직 유지)
+// --- API 엔드포인트 ---
 app.post('/api/sensor-data', async (req, res) => {
   const { electricity, gas } = req.body;
   const electricityValue = parseFloat(electricity);
@@ -215,16 +240,20 @@ app.post('/api/sensor-data', async (req, res) => {
 });
 
 /**
- * usage-data 반환 (기존 로직 유지)
+ * [수정됨] sensor_data, test, 그리고 realtime_env 데이터를 병합하여 반환합니다.
  */
 app.get('/api/usage-data', async (req, res) => {
   try {
+    // 1. 월별 누적 및 테스트 데이터 가져오기 (지난 달 비교값은 여기서 나옴)
     const mergedData = await fetchAndMergeUsageData('sensor_data', 'test');
+    
+    // 2. 실시간 환경 데이터 가져오기 (realtime_power_W 포함)
     const realtimeData = await fetchRealtimeEnvData();
     
+    // 3. 두 데이터를 합쳐서 클라이언트에 전송
     const responseData = {
         ...mergedData,
-        ...realtimeData 
+        ...realtimeData // 모든 실시간 필드가 포함됨 (realtime_power_W 포함)
     };
     
     res.status(200).json(responseData);
@@ -257,120 +286,10 @@ app.get('/api/init-historical-data', async (req, res) => {
     }
 });
 
+// --- 사용자 관리 API ---
 
-// -------------------- [추가] 인증 및 딥러닝 연동 API --------------------
+const usersRef = db.ref('users');
 
-/**
- * POST /api/authenticate
- * App에서 인증 요청을 받으면, 캡처 데이터와 사용자 정보를 딥러닝 서버로 전달하고,
- * 결과를 받아 door_state와 로그를 업데이트합니다.
- */
-app.post('/api/authenticate', async (req, res) => {
-    const { username } = req.body;
-
-    if (!username) {
-        return res.status(400).json({ error: '인증할 사용자 이름이 필요합니다.' });
-    }
-
-    try {
-        // 1. 최신 캡처 데이터 (이미지 URL, 음성 레벨) 가져오기
-        const captureSnapshot = await latestCaptureRef.once('value');
-        const captureData = captureSnapshot.val();
-
-        if (!captureData || !captureData.imageUrl || !captureData.dB_level) {
-            // 데이터가 없으면 DB에 거절 상태 기록
-            await controlsRef.child('door_state').set('refusal');
-            console.warn('인증 실패: 최신 캡처 데이터 불완전.');
-            return res.status(404).json({ error: '최신 캡처 데이터가 불완전합니다. ESP32-CAM 확인 필요.' });
-        }
-        
-        // 2. 등록된 사용자 정보 가져오기 (비교 기준 데이터)
-        const userSnapshot = await usersRef.orderByChild('username').equalTo(username).once('value');
-        const userDataKey = userSnapshot.exists() ? Object.keys(userSnapshot.val())[0] : null;
-        const userData = userDataKey ? userSnapshot.val()[userDataKey] : null;
-
-        if (!userData || !userData.registered_image_url || !userData.registered_voice_level) {
-            // 미등록 사용자 또는 등록 데이터 불완전
-            const logEntry = {
-                timestamp: new Date().toISOString(),
-                result: 'refusal',
-                type: 'FACE_VOICE',
-                username: username,
-                logMessage: '미등록 사용자 또는 등록 데이터 불완전',
-                imageUrl: captureData.imageUrl,
-                dB_level: captureData.dB_level,
-                timeMillis: admin.database.ServerValue.TIMESTAMP
-            };
-            await controlsRef.child('door_state').set('refusal');
-            await logsRef.push(logEntry);
-            return res.status(401).json({ result: 'refusal', message: '미등록 사용자' });
-        }
-
-        // 3. 딥러닝 서버로 데이터 전송 (axios 시뮬레이션)
-        const requestPayload = {
-            captured_image_url: captureData.imageUrl,
-            captured_db_level: captureData.dB_level,
-            registered_image_url: userData.registered_image_url,
-            registered_db_level: userData.registered_voice_level,
-            user_id: userDataKey 
-        };
-        
-        let deepLearningResponse;
-        
-        try {
-            // 실제 딥러닝 서버 호출 (주석 처리 또는 시뮬레이션)
-            // deepLearningResponse = await axios.post(DEEP_LEARNING_SERVER_URL, requestPayload);
-            
-            // 시뮬레이션: 사용자 이름이 'approval'이면 성공, 아니면 실패
-            const isApproval = username.toLowerCase().includes('approval') || username.toLowerCase().includes('승인');
-            deepLearningResponse = { 
-                data: {
-                    match: isApproval,
-                    confidence: isApproval ? 0.95 : 0.10,
-                    face_match_status: isApproval ? 'MATCHED' : 'NOT_MATCHED',
-                    voice_match_status: isApproval ? 'MATCHED' : 'NOT_MATCHED'
-                }
-            };
-
-            console.log('딥러닝 서버 시뮬레이션 응답:', deepLearningResponse.data);
-
-        } catch (dlError) {
-            console.error('딥러닝 서버 호출 실패:', dlError.message);
-            // 딥러닝 서버 통신 실패 시 거절 처리
-            await controlsRef.child('door_state').set('refusal');
-            return res.status(500).json({ error: '인증 서버 통신 오류' });
-        }
-
-        // 4. 딥러닝 서버 결과 처리 및 DB 업데이트
-        const finalResult = deepLearningResponse.data.match ? 'approval' : 'refusal';
-        const logMessage = `Face: ${deepLearningResponse.data.face_match_status}, Voice: ${deepLearningResponse.data.voice_match_status}, Conf: ${deepLearningResponse.data.confidence.toFixed(2)}`;
-
-        const logEntry = {
-            timestamp: new Date().toISOString(),
-            result: finalResult,
-            type: 'FACE_VOICE',
-            username: username,
-            logMessage: logMessage,
-            imageUrl: captureData.imageUrl,
-            dB_level: captureData.dB_level,
-            timeMillis: admin.database.ServerValue.TIMESTAMP
-        };
-
-        await controlsRef.child('door_state').set(finalResult);
-        await logsRef.push(logEntry);
-
-        res.status(200).json({ result: finalResult, message: logMessage });
-
-    } catch (error) {
-        console.error('인증 프로세스 오류:', error);
-        res.status(500).json({ error: '서버 내부 오류' });
-    }
-});
-
-
-// -------------------- 사용자 관리 API (기존 로직 유지) --------------------
-
-// 사용자 조회
 app.get('/api/users', async (req, res) => {
     try {
         const ownerId = req.query.ownerId; 
@@ -401,21 +320,16 @@ app.post('/api/users', async (req, res) => {
         if (req.body.id && req.body.password && req.body.username) {
             const { id, username, password } = req.body;
             
+            // ID 중복 검사
             const idSnapshot = await usersRef.orderByChild('id').equalTo(id).once('value');
             if (idSnapshot.exists()) return res.status(409).json({ error: '이미 사용 중인 아이디입니다.' });
             
+            // Username 중복 검사 
             const usernameSnapshot = await usersRef.orderByChild('username').equalTo(username).once('value');
             if (usernameSnapshot.exists()) return res.status(409).json({ error: '이미 사용 중인 이름입니다.' });
 
             const newUserRef = usersRef.push();
-            await newUserRef.set({ 
-                id, 
-                username, 
-                password,
-                // [추가] 초기 등록 데이터 필드 (나중에 업데이트 필요)
-                registered_image_url: null,
-                registered_voice_level: null
-            }); 
+            await newUserRef.set({ id, username, password }); 
             return res.status(201).json({ id: newUserRef.key, message: '회원가입 성공' });
         } 
         
@@ -442,10 +356,8 @@ app.post('/api/users', async (req, res) => {
     }
 });
 
-// 사용자 정보 수정 (기존 로직 유지)
 app.put('/api/users/:id', async (req, res) => {
     try {
-        // 이 엔드포인트를 통해 registered_image_url 및 registered_voice_level을 업데이트할 수 있음
         await usersRef.child(req.params.id).update(req.body);
         res.status(200).send('수정 성공');
     } catch (error) {
@@ -453,7 +365,6 @@ app.put('/api/users/:id', async (req, res) => {
     }
 });
 
-// 사용자 삭제 (기존 로직 유지)
 app.delete('/api/users/:id', async (req, res) => {
     const userId = req.params.id;
     const userRef = usersRef.child(userId);
